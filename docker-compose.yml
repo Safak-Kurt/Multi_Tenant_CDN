@@ -1,0 +1,111 @@
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: cdn-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - cdn-pgdata:/var/lib/postgresql/data
+    networks:
+      - cdn-network
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: cdn-redis
+    networks:
+      - cdn-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    container_name: cdn-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - cdn-miniodata:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - cdn-network
+
+  api:
+    build:
+      context: ./api
+    container_name: cdn-api
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks:
+      - cdn-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://localhost:4000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    build:
+      context: ./nginx
+    container_name: cdn-nginx
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    networks:
+      - cdn-network
+
+  dashboard:
+    build:
+      context: ./dashboard
+    container_name: cdn-dashboard
+    ports:
+      - "3000:80"
+    networks:
+      - cdn-network
+
+networks:
+  cdn-network:
+    name: cdn-network
+
+volumes:
+  cdn-pgdata:
+    name: cdn-pgdata
+
+  cdn-miniodata:
+    name: cdn-miniodata
