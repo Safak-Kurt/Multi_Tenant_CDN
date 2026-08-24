@@ -51,12 +51,19 @@ services:
     build:
       context: ./api
     container_name: cdn-api
+    
+    env_file:
+      - .env
+
+
     environment:
       PORT: 4000
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000
+      DEFAULT_STORAGE_QUOTA_BYTES: ${DEFAULT_STORAGE_QUOTA_BYTES}
+      DEFAULT_BANDWIDTH_QUOTA_BYTES: ${DEFAULT_BANDWIDTH_QUOTA_BYTES}
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,7 +1,30 @@
-FROM node:22-alpine
+FROM node:20-alpine AS dependencies
+
 WORKDIR /app
+
 COPY package*.json ./
-RUN npm install --omit=dev
-COPY . .
+
+RUN npm ci --omit=dev
+
+
+FROM node:20-alpine AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY --from=dependencies /app/node_modules ./node_modules
+
+COPY package*.json ./
+
+COPY server.js ./
+COPY db ./db
+COPY migrations ./migrations
+COPY routes ./routes
+COPY services ./services
+
+USER node
+
 EXPOSE 4000
-CMD ["npm", "start"]
+
+CMD ["sh", "-c", "npm run migrate && npm start"]
