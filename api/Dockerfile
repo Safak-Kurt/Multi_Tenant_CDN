@@ -22,6 +22,7 @@ COPY db ./db
 COPY migrations ./migrations
 COPY routes ./routes
 COPY services ./services
+COPY middleware ./middleware
 
 USER node
 
