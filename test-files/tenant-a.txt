@@ -1,0 +1,1 @@
+Multi-Tenant CDN Day 3 - Tenant A isolated file
