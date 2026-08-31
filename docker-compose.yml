@@ -51,7 +51,7 @@ services:
     build:
       context: ./api
     container_name: cdn-api
-    
+
     env_file:
       - .env
 
@@ -64,6 +64,9 @@ services:
       MINIO_PORT: 9000
       DEFAULT_STORAGE_QUOTA_BYTES: ${DEFAULT_STORAGE_QUOTA_BYTES}
       DEFAULT_BANDWIDTH_QUOTA_BYTES: ${DEFAULT_BANDWIDTH_QUOTA_BYTES}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
     depends_on:
       postgres:
         condition: service_healthy

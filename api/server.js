@@ -3,6 +3,7 @@ const express = require("express");
 const pool = require("./db/pool");
 const tenantsRouter = require("./routes/tenants");
 const authRoutes = require("./routes/auth");
+const uploadRoutes = require("./routes/uploads");
 
 const app = express();
 
@@ -39,6 +40,7 @@ app.get("/health", async (req, res) => {
 
 app.use("/api/tenants", tenantsRouter);
 app.use("/api/auth", authRoutes);
+app.use("/api/upload", uploadRoutes);
 
 app.use((err, req, res, next) => {
     console.error(err);
