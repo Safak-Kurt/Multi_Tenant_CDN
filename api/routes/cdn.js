@@ -1,4 +1,5 @@
 const express = require("express");
+const { Transform } = require("node:stream");
 
 const { authenticateTenant } = require("../middleware/auth");
 
@@ -8,6 +9,13 @@ const {
   getTenantObjectStream,
   isMinioNotFoundError
 } = require("../services/cdnService");
+
+const {
+  CACHE_TTL_SECONDS,
+  buildCdnCacheKey,
+  getCachedObject,
+  setCachedObject
+} = require("../services/cacheService");
 
 const router = express.Router();
 
@@ -78,6 +86,55 @@ function notModifiedSince(ifModifiedSince, lastModified) {
   return objectSeconds <= requestSeconds;
 }
 
+function setRepresentationHeaders(
+  res,
+  {
+    contentType,
+    etag,
+    lastModified,
+    cacheStatus
+  }
+) {
+  res.set({
+    "Content-Type": contentType,
+    "Cache-Control": "private, no-cache",
+    ETag: etag,
+    "Last-Modified": lastModified.toUTCString(),
+    Vary: "X-API-Key",
+    "X-Cache": cacheStatus
+  });
+}
+
+function isNotModifiedRequest(
+  req,
+  etag,
+  lastModified
+) {
+  const ifNoneMatch = req.get("If-None-Match");
+
+  if (
+    ifNoneMatch &&
+    matchesIfNoneMatch(
+      ifNoneMatch,
+      etag
+    )
+  ) {
+    return true;
+  }
+
+  const ifModifiedSince =
+    req.get("If-Modified-Since");
+
+  return (
+    !ifNoneMatch &&
+    ifModifiedSince &&
+    notModifiedSince(
+      ifModifiedSince,
+      lastModified
+    )
+  );
+}
+
 router.get(
   "/*objectPath",
   authenticateTenant,
@@ -92,54 +149,112 @@ router.get(
       });
     }
 
+    const tenantId = req.tenant.id;
     const bucketName = req.tenant.bucketName;
 
+    const cacheKey = buildCdnCacheKey(
+      tenantId,
+      objectPath
+    );
+
     try {
+      let cachedObject = null;
+      let cacheReadAvailable = true;
+
+      try {
+        const cached = await getCachedObject(
+          tenantId,
+          objectPath
+        );
+
+        cachedObject = cached.object;
+      } catch (cacheError) {
+        cacheReadAvailable = false;
+
+        console.error(
+          `[Cache] READ ERROR ${cacheKey}:`,
+          cacheError.message
+        );
+      }
+
+      if (cachedObject) {
+        console.log(
+          `[Cache] HIT ${cacheKey}`
+        );
+
+        setRepresentationHeaders(
+          res,
+          {
+            contentType:
+              cachedObject.contentType,
+            etag:
+              cachedObject.etag,
+            lastModified:
+              cachedObject.lastModified,
+            cacheStatus: "HIT"
+          }
+        );
+
+        if (
+          isNotModifiedRequest(
+            req,
+            cachedObject.etag,
+            cachedObject.lastModified
+          )
+        ) {
+          return res.status(304).end();
+        }
+
+        res.set(
+          "Content-Length",
+          String(cachedObject.size)
+        );
+
+        return res
+          .status(200)
+          .send(cachedObject.body);
+      }
+
+      const cacheStatus =
+        cacheReadAvailable
+          ? "MISS"
+          : "BYPASS";
+
+      console.log(
+        `[Cache] ${cacheStatus} ${cacheKey}`
+      );
+
       const stat = await statTenantObject(
         bucketName,
         objectPath
       );
 
-      const contentType = resolveContentType(
-        objectPath,
-        stat.metaData
+      const contentType =
+        resolveContentType(
+          objectPath,
+          stat.metaData
+        );
+
+      const etag =
+        formatETag(stat.etag);
+
+      const lastModified =
+        new Date(stat.lastModified);
+
+      setRepresentationHeaders(
+        res,
+        {
+          contentType,
+          etag,
+          lastModified,
+          cacheStatus
+        }
       );
 
-      const etag = formatETag(stat.etag);
-
-      const lastModified = new Date(
-        stat.lastModified
-      );
-
-      res.set({
-        "Content-Type": contentType,
-        "Cache-Control": "private, no-cache",
-        ETag: etag,
-        "Last-Modified": lastModified.toUTCString(),
-        Vary: "X-API-Key"
-      });
-
-      const ifNoneMatch =
-        req.get("If-None-Match");
-
       if (
-        ifNoneMatch &&
-        matchesIfNoneMatch(
-          ifNoneMatch,
-          etag
-        )
-      ) {
-        return res.status(304).end();
-      }
-
-      const ifModifiedSince =
-        req.get("If-Modified-Since");
-
-      if (
-        !ifNoneMatch &&
-        ifModifiedSince &&
-        notModifiedSince(
-          ifModifiedSince,
+        isNotModifiedRequest(
+          req,
+          etag,
           lastModified
         )
       ) {
@@ -157,21 +272,95 @@ router.get(
           objectPath
         );
 
-      objectStream.on("error", (error) => {
-        if (!res.headersSent) {
-          return next(error);
-        }
+      const chunks = [];
 
-        res.destroy(error);
+      const cacheTee = new Transform({
+        transform(
+          chunk,
+          encoding,
+          callback
+        ) {
+          const bufferChunk =
+            Buffer.isBuffer(chunk)
+              ? chunk
+              : Buffer.from(
+                  chunk,
+                  encoding
+                );
+
+          chunks.push(bufferChunk);
+
+          callback(
+            null,
+            bufferChunk
+          );
+        },
+
+        flush(callback) {
+          const body =
+            Buffer.concat(chunks);
+
+          setCachedObject(
+            tenantId,
+            objectPath,
+            {
+              body,
+              size: stat.size,
+              contentType,
+              etag,
+              lastModified
+            }
+          )
+            .then(() => {
+              console.log(
+                `[Cache] STORE ${cacheKey} ttl=${CACHE_TTL_SECONDS}s`
+              );
+            })
+            .catch((cacheError) => {
+              console.error(
+                `[Cache] STORE ERROR ${cacheKey}:`,
+                cacheError.message
+              );
+            })
+            .finally(() => {
+              callback();
+            });
+        }
       });
 
-      objectStream.pipe(res);
+      objectStream.on(
+        "error",
+        (error) => {
+          cacheTee.destroy(error);
+        }
+      );
+
+      cacheTee.on(
+        "error",
+        (error) => {
+          if (!res.headersSent) {
+            return next(error);
+          }
+
+          res.destroy(error);
+        }
+      );
+
+      objectStream
+        .pipe(cacheTee)
+        .pipe(res);
     } catch (error) {
-      if (isMinioNotFoundError(error)) {
+      if (
+        isMinioNotFoundError(error)
+      ) {
         return res.status(404).json({
           error: "Object not found",
           objectPath
         });
+      }
+
+      if (res.headersSent) {
+        return res.destroy(error);
       }
 
       next(error);

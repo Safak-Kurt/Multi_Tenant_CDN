@@ -10,6 +10,14 @@ const {
   ensureTenantBucket,
 } = require("../services/minioService");
 
+const {
+  isMinioNotFoundError,
+} = require("../services/cdnService");
+
+const {
+  invalidateCachedObject,
+} = require("../services/cacheService");
+
 const router = express.Router();
 
 const parsedMaxUploadBytes = Number.parseInt(
@@ -66,6 +74,26 @@ function buildObjectName(req, file) {
   return segments.join("/");
 }
 
+function buildObjectPath(value) {
+  const segments = Array.isArray(value)
+    ? value
+    : [value];
+
+  if (
+    segments.length === 0 ||
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".."
+    )
+  ) {
+    return null;
+  }
+
+  return segments.join("/");
+}
+
 function hasForbiddenTenantSelector(body = {}) {
   const forbiddenFields = [
     "tenantId",
@@ -82,101 +110,212 @@ function hasForbiddenTenantSelector(body = {}) {
   );
 }
 
-const singleFileUpload = upload.single("file");
+const singleFileUpload =
+  upload.single("file");
 
 router.post(
   "/",
   authenticateTenant,
   (req, res, next) => {
-    singleFileUpload(req, res, async (uploadError) => {
-      if (uploadError instanceof multer.MulterError) {
-        if (uploadError.code === "LIMIT_FILE_SIZE") {
-          return res.status(413).json({
-            error: "Uploaded file exceeds maximum size",
-            maxUploadBytes: MAX_UPLOAD_BYTES,
-          });
-        }
+    singleFileUpload(
+      req,
+      res,
+      async (uploadError) => {
+        if (
+          uploadError instanceof
+          multer.MulterError
+        ) {
+          if (
+            uploadError.code ===
+            "LIMIT_FILE_SIZE"
+          ) {
+            return res.status(413).json({
+              error:
+                "Uploaded file exceeds maximum size",
+              maxUploadBytes:
+                MAX_UPLOAD_BYTES,
+            });
+          }
 
-        return res.status(400).json({
-          error: uploadError.message,
-        });
-      }
-
-      if (uploadError) {
-        return next(uploadError);
-      }
-
-      try {
-        if (hasForbiddenTenantSelector(req.body)) {
           return res.status(400).json({
-            error:
-              "Tenant and bucket are derived from the authenticated API key",
+            error: uploadError.message,
           });
         }
 
-        if (!req.file) {
-          return res.status(400).json({
-            error:
-              "A file must be provided in the 'file' form field",
-          });
+        if (uploadError) {
+          return next(uploadError);
         }
-
-        let objectName;
 
         try {
-          objectName = buildObjectName(
-            req,
-            req.file
+          if (
+            hasForbiddenTenantSelector(
+              req.body
+            )
+          ) {
+            return res.status(400).json({
+              error:
+                "Tenant and bucket are derived from the authenticated API key",
+            });
+          }
+
+          if (!req.file) {
+            return res.status(400).json({
+              error:
+                "A file must be provided in the 'file' form field",
+            });
+          }
+
+          let objectName;
+
+          try {
+            objectName =
+              buildObjectName(
+                req,
+                req.file
+              );
+          } catch (error) {
+            return res.status(400).json({
+              error: error.message,
+            });
+          }
+
+          const bucketName =
+            req.tenant.bucketName;
+
+          await ensureTenantBucket(
+            bucketName
           );
-        } catch (error) {
-          return res.status(400).json({
-            error: error.message,
-          });
-        }
 
-        const bucketName =
-          req.tenant.bucketName;
+          const uploadResult =
+            await minioClient.putObject(
+              bucketName,
+              objectName,
+              req.file.buffer,
+              req.file.size,
+              {
+                "Content-Type":
+                  req.file.mimetype ||
+                  "application/octet-stream",
+                "X-Amz-Meta-Tenant-Id":
+                  req.tenant.id,
+              }
+            );
 
-        await ensureTenantBucket(bucketName);
+          const invalidation =
+            await invalidateCachedObject(
+              req.tenant.id,
+              objectName
+            );
 
-        const uploadResult =
-          await minioClient.putObject(
-            bucketName,
-            objectName,
-            req.file.buffer,
-            req.file.size,
-            {
-              "Content-Type":
+          console.log(
+            `[Cache] INVALIDATE ${invalidation.cacheKey} deleted=${invalidation.deleted}`
+          );
+
+          return res.status(201).json({
+            message:
+              "File uploaded successfully",
+            tenant: {
+              id: req.tenant.id,
+              slug: req.tenant.slug,
+            },
+            object: {
+              bucket: bucketName,
+              key: objectName,
+              size: req.file.size,
+              contentType:
                 req.file.mimetype ||
                 "application/octet-stream",
-              "X-Amz-Meta-Tenant-Id":
-                req.tenant.id,
-            }
-          );
-
-        return res.status(201).json({
-          message: "File uploaded successfully",
-          tenant: {
-            id: req.tenant.id,
-            slug: req.tenant.slug,
-          },
-          object: {
-            bucket: bucketName,
-            key: objectName,
-            size: req.file.size,
-            contentType:
-              req.file.mimetype ||
-              "application/octet-stream",
-            etag:
-              typeof uploadResult === "string"
-                ? uploadResult
-                : uploadResult?.etag || null,
-          },
-        });
-      } catch (error) {
-        next(error);
+              etag:
+                typeof uploadResult ===
+                "string"
+                  ? uploadResult
+                  : uploadResult?.etag ||
+                    null,
+            },
+            cache: {
+              key:
+                invalidation.cacheKey,
+              invalidated:
+                invalidation.deleted > 0,
+            },
+          });
+        } catch (error) {
+          next(error);
+        }
       }
-    });
+    );
+  }
+);
+
+router.delete(
+  "/*objectPath",
+  authenticateTenant,
+  async (req, res, next) => {
+    const objectPath =
+      buildObjectPath(
+        req.params.objectPath
+      );
+
+    if (!objectPath) {
+      return res.status(400).json({
+        error: "Invalid object path",
+      });
+    }
+
+    const bucketName =
+      req.tenant.bucketName;
+
+    try {
+      await minioClient.statObject(
+        bucketName,
+        objectPath
+      );
+
+      await minioClient.removeObject(
+        bucketName,
+        objectPath
+      );
+
+      const invalidation =
+        await invalidateCachedObject(
+          req.tenant.id,
+          objectPath
+        );
+
+      console.log(
+        `[Cache] INVALIDATE ${invalidation.cacheKey} deleted=${invalidation.deleted}`
+      );
+
+      return res.status(200).json({
+        message:
+          "File deleted successfully",
+        tenant: {
+          id: req.tenant.id,
+          slug: req.tenant.slug,
+        },
+        object: {
+          bucket: bucketName,
+          key: objectPath,
+        },
+        cache: {
+          key:
+            invalidation.cacheKey,
+          invalidated:
+            invalidation.deleted > 0,
+        },
+      });
+    } catch (error) {
+      if (
+        isMinioNotFoundError(error)
+      ) {
+        return res.status(404).json({
+          error: "Object not found",
+          objectPath,
+        });
+      }
+
+      next(error);
+    }
   }
 );
 
