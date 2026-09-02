@@ -5,6 +5,7 @@ const tenantsRouter = require("./routes/tenants");
 const authRoutes = require("./routes/auth");
 const uploadRoutes = require("./routes/uploads");
 const cdnRoutes = require("./routes/cdn");
+const signedUrlRoutes = require("./routes/signedUrls");
 
 const app = express();
 
@@ -43,6 +44,7 @@ app.use("/api/tenants", tenantsRouter);
 app.use("/api/auth", authRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use("/cdn", cdnRoutes);
+app.use("/api/signed-urls", signedUrlRoutes);
 
 app.use((err, req, res, next) => {
     console.error(err);

@@ -1,7 +1,7 @@
 const express = require("express");
 const { Transform } = require("node:stream");
 
-const { authenticateTenant } = require("../middleware/auth");
+const { authorizeCdnRequest } = require("../middleware/cdnAuthorization");
 
 const {
   resolveContentType,
@@ -137,7 +137,7 @@ function isNotModifiedRequest(
 
 router.get(
   "/*objectPath",
-  authenticateTenant,
+  authorizeCdnRequest,
   async (req, res, next) => {
     const objectPath = buildObjectPath(
       req.params.objectPath
